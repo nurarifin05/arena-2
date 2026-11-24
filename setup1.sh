@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Energy Nasional — native Ubuntu 24.04 / Nginx / PHP 8.3 FPM.
+# Energy Nasional — native Ubuntu 24.04 / 26.04 / Nginx / distro PHP-FPM.
 # Training uploads are stored in a protected directory inside the web root and never executed.
 set -Eeuo pipefail
 export DEBIAN_FRONTEND=noninteractive
@@ -12,22 +12,39 @@ UP="$WEB/upload"
 log(){ printf '[Energy Nasional] %s\n' "$*"; }
 fail(){ printf '[ERROR] %s\n' "$*" >&2; exit 1; }
 status(){
-  systemctl is-active nginx php8.3-fpm || true
+  systemctl is-active nginx || true
+  systemctl list-units --type=service --all "php*-fpm.service" --no-pager || true
   curl --noproxy '*' -sSI --max-time 10 --resolve "$LAB_DOMAIN:80:$LAB_IP" "http://$LAB_DOMAIN/" || true
   log "Webroot: $WEB | Access log: /var/log/nginx/access.log"
 }
 if [[ "${1:-}" == '--status' ]]; then status; exit 0; fi
-[[ $EUID -eq 0 ]] || fail 'Jalankan sebagai root: sudo ./setup-arena2-native.sh'
+[[ $EUID -eq 0 ]] || fail 'Jalankan sebagai root: sudo bash setup1.sh'
 [[ "$LAB_DOMAIN" =~ ^[a-zA-Z0-9.-]+$ ]] || fail 'Domain tidak valid'
 [[ "$LAB_IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail 'IP tidak valid'
 [[ "$LAB_SUBNET" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+$ ]] || fail 'Subnet tidak valid'
 . /etc/os-release
-[[ "$ID" == ubuntu && "$VERSION_ID" == 24.04 ]] || fail 'Installer memerlukan Ubuntu 24.04'
+[[ "$ID" == ubuntu && ( "$VERSION_ID" == 24.04 || "$VERSION_ID" == 26.04 ) ]] || fail 'Installer memerlukan Ubuntu 24.04 atau 26.04'
 ip -4 -o addr show | awk '{split($4,a,"/");print a[1]}' | grep -Fxq "$LAB_IP" || fail "IP $LAB_IP belum terpasang pada interface VM"
 trap 'printf "[ERROR] Gagal pada baris %s\n" "$LINENO" >&2' ERR
 log 'Memasang dependensi native...'
 apt-get update
-apt-get install -y nginx php8.3-fpm php8.3-cli curl ca-certificates iproute2
+apt-get install -y nginx php-fpm php-cli curl ca-certificates iproute2
+PHP_PKG="$(dpkg-query -W -f='${Depends}' php-fpm | grep -oE 'php[0-9]+\.[0-9]+-fpm' | head -n1)"
+[[ "$PHP_PKG" =~ ^php([0-9]+\.[0-9]+)-fpm$ ]] || fail 'Tidak dapat mendeteksi paket PHP-FPM default'
+PHP_VERSION="${BASH_REMATCH[1]}"
+PHP_SERVICE="php${PHP_VERSION}-fpm"
+log "PHP-FPM terdeteksi: $PHP_VERSION"
+apt-get install -y "php${PHP_VERSION}-cli"
+# Stop an older Energy pool only if it exists, avoiding socket conflicts.
+for old in /etc/php/*/fpm/pool.d/energy.conf; do
+  [[ -f "$old" ]] || continue
+  [[ "$old" == "/etc/php/$PHP_VERSION/fpm/pool.d/energy.conf" ]] && continue
+  old_version="${old#/etc/php/}"; old_version="${old_version%%/*}"
+  mv "$old" "$old.disabled.$(date +%s)"
+  if systemctl is-active --quiet "php${old_version}-fpm"; then
+    systemctl reload "php${old_version}-fpm"
+  fi
+done
 # Stop only containers belonging to the previous Energy installation, if present.
 if command -v docker >/dev/null && docker info >/dev/null 2>&1; then
   for c in energy-ctf-nginx-1 energy-ctf-php-1 energy-php56; do
@@ -232,8 +249,8 @@ chmod 0777 "$UP" "$UP/contact" "$UP/customer"
 touch "$UP/upload-events.log"
 chown www-data:www-data "$UP/upload-events.log"
 chmod 0640 "$UP/upload-events.log"
-php8.3 -l "$WEB/index.php"
-cat > /etc/php/8.3/fpm/pool.d/energy.conf <<'FPM'
+"php${PHP_VERSION}" -l "$WEB/index.php"
+cat > "/etc/php/$PHP_VERSION/fpm/pool.d/energy.conf" <<'FPM'
 [energy]
 user = www-data
 group = www-data
@@ -294,10 +311,10 @@ ln -sfn "$CONF" /etc/nginx/sites-enabled/energy-ctf
 if [[ -L /etc/nginx/sites-enabled/default && "$(readlink -f /etc/nginx/sites-enabled/default)" == /etc/nginx/sites-available/default ]]; then
   rm /etc/nginx/sites-enabled/default
 fi
-php-fpm8.3 -t
+"php-fpm${PHP_VERSION}" -t
 nginx -t
-systemctl enable php8.3-fpm nginx
-systemctl restart php8.3-fpm
+systemctl enable "$PHP_SERVICE" nginx
+systemctl restart "$PHP_SERVICE"
 systemctl restart nginx
 # Replace only the domain token in /etc/hosts, retaining other aliases.
 cp -a /etc/hosts "/etc/hosts.energy.bak.$(date +%s)"
