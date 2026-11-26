@@ -1,0 +1,24 @@
+server {
+    listen 192.168.36.81:80;
+    server_name energy.co.id;
+    root /opt/energy-ctf/www;
+    index index.php;
+    client_max_body_size 10m;
+    access_log /var/log/nginx/access.log energy_upload;
+    error_log /var/log/nginx/error.log warn;
+    allow 192.168.36.0/24;
+    deny all;
+    add_header X-Content-Type-Options nosniff always;
+    add_header X-Training-Lab Energy-CTF-local-only always;
+    location /assets/ { try_files $uri =404; expires 12h; }
+    location / { try_files $uri $uri/ @application; }
+    location @application { rewrite ^/(.*)$ /index.php?page=$1 last; }
+    location ~ \.php$ {
+        include fastcgi_params;
+        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+        fastcgi_pass unix:/run/php/energy-fpm.sock;
+        fastcgi_read_timeout 30s;
+        fastcgi_hide_header X-Energy-Upload-Filename;
+    }
+    location ~ /\. { deny all; }
+}
